@@ -1,0 +1,11 @@
+[package]
+name = "browserkit-types"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-independent BrowserKit types"
+
+[dependencies]
+thiserror = "2"
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,9 @@
+[package]
+name = "browserkit-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+browserkit-types = { path = "../browserkit-types" }
+browserkit-wry = { path = "../browserkit-wry" }
+tao = "0.34"

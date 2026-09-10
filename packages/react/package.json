@@ -1,0 +1,18 @@
+{
+  "name": "@browserkit/react",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+
+exclude = ["vendor/wry"]
+
+members = [
+  "crates/browserkit",
+  "crates/browserkit-runtime",
+  "crates/browserkit-wry",
+  "crates/browserkit-types",
+  "examples/native",
+]
