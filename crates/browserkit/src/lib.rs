@@ -66,6 +66,15 @@ impl Page<'_> {
     pub fn navigate(&self, url: &str) -> Result<()> {
         self.browser.runtime.navigate(self.window_id, self.id, url)
     }
+    pub fn go_back(&self) -> Result<()> {
+        self.browser.runtime.go_back(self.window_id, self.id)
+    }
+    pub fn go_forward(&self) -> Result<()> {
+        self.browser.runtime.go_forward(self.window_id, self.id)
+    }
+    pub fn reload(&self) -> Result<()> {
+        self.browser.runtime.reload(self.window_id, self.id)
+    }
     pub fn set_bounds(&mut self, bounds: LogicalRect) -> Result<()> {
         self.browser
             .runtime

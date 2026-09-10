@@ -2,7 +2,14 @@
 
 mod webview;
 
-pub use webview::{NativeRoot, WebView};
+pub use webview::{ChromeWebView, NativeRoot, WebView};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeCommand {
+    Back,
+    Forward,
+    Reload,
+}
 
 use browserkit_types::{Error, ErrorKind, PageOptions, Result, WebViewHostMode};
 use tao::window::Window;
@@ -15,6 +22,8 @@ pub trait PlatformBackend {
         options: &PageOptions,
         debug_native_overlay: bool,
     ) -> Result<WebView>;
+
+    fn create_chrome(&self, window: &Window, root: &mut NativeRoot) -> Result<ChromeWebView>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -35,6 +44,10 @@ impl PlatformBackend for WryBackend {
             root.add_debug_overlay()?;
         }
         Ok(webview)
+    }
+
+    fn create_chrome(&self, window: &Window, root: &mut NativeRoot) -> Result<ChromeWebView> {
+        ChromeWebView::new(window, root)
     }
 }
 

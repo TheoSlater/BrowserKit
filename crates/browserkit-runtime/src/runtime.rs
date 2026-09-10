@@ -4,13 +4,17 @@ use browserkit_types::{
     BrowserOptions, Error, ErrorKind, LogicalRect, PageId, PageOptions, Result, WindowId,
     WindowOptions,
 };
-use browserkit_wry::{NativeRoot, PlatformBackend, WebView, WryBackend};
+use browserkit_wry::{
+    ChromeCommand, ChromeWebView, NativeRoot, PlatformBackend, WebView, WryBackend,
+};
 use tao::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
+
+use crate::ownership::{FocusOwner, InputCoordinator};
 
 pub struct Runtime {
     event_loop: EventLoop<()>,
@@ -22,6 +26,9 @@ pub struct Runtime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PageSurfaceId(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ChromeSurfaceId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceLifecycle {
@@ -39,6 +46,14 @@ struct PageSurface {
     focused: bool,
     z_order: u64,
     lifecycle: SurfaceLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChromeSurface {
+    id: ChromeSurfaceId,
+    bounds: LogicalRect,
+    visible: bool,
+    focused: bool,
 }
 
 impl PageSurface {
@@ -67,11 +82,18 @@ struct RuntimeWindow {
     pages: HashMap<PageId, RuntimePage>,
     page_order: Vec<PageId>,
     active_page: Option<PageId>,
+    chrome: Option<RuntimeChrome>,
+    input: InputCoordinator,
 }
 
 struct RuntimePage {
     webview: WebView,
     surface: PageSurface,
+}
+
+struct RuntimeChrome {
+    webview: ChromeWebView,
+    surface: ChromeSurface,
 }
 
 impl Runtime {
@@ -106,6 +128,8 @@ impl Runtime {
                 pages: HashMap::new(),
                 page_order: Vec::new(),
                 active_page: None,
+                chrome: None,
+                input: InputCoordinator::default(),
             },
         );
         Ok(id)
@@ -117,6 +141,30 @@ impl Runtime {
             .windows
             .get_mut(&window_id)
             .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
+        if options.host_mode == browserkit_types::WebViewHostMode::Composition
+            && window.chrome.is_none()
+        {
+            let chrome = self
+                .backend
+                .create_chrome(&window.window, &mut window.root)?;
+            window.chrome = Some(RuntimeChrome {
+                webview: chrome,
+                surface: ChromeSurface {
+                    id: ChromeSurfaceId(self.next_surface_id),
+                    bounds: LogicalRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                    visible: true,
+                    focused: false,
+                },
+            });
+            self.next_surface_id += 1;
+            #[cfg(debug_assertions)]
+            eprintln!("BrowserKit chrome_created");
+        }
         let webview = self.backend.create_page(
             &window.window,
             &mut window.root,
@@ -159,6 +207,8 @@ impl Runtime {
             .pages
             .insert(page_id, RuntimePage { webview, surface });
         window.page_order.push(page_id);
+        let initial_size = window.window.inner_size();
+        apply_resize(window, initial_size);
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit page_created: page={page_id:?} surface={surface_id:?}");
         Ok(page_id)
@@ -166,6 +216,15 @@ impl Runtime {
 
     pub fn navigate(&self, window_id: WindowId, page_id: PageId, url: &str) -> Result<()> {
         self.page(window_id, page_id)?.webview.navigate(url)
+    }
+    pub fn go_back(&self, window_id: WindowId, page_id: PageId) -> Result<()> {
+        self.page(window_id, page_id)?.webview.go_back()
+    }
+    pub fn go_forward(&self, window_id: WindowId, page_id: PageId) -> Result<()> {
+        self.page(window_id, page_id)?.webview.go_forward()
+    }
+    pub fn reload(&self, window_id: WindowId, page_id: PageId) -> Result<()> {
+        self.page(window_id, page_id)?.webview.reload()
     }
     pub fn set_bounds(
         &mut self,
@@ -197,6 +256,9 @@ impl Runtime {
             window.active_page = None;
             page.surface.focused = false;
         }
+        if visible {
+            window.input.focused_surface = FocusOwner::Page(page_id);
+        }
         Ok(())
     }
     pub fn focus(&mut self, window_id: WindowId, page_id: PageId) -> Result<()> {
@@ -214,6 +276,7 @@ impl Runtime {
             .ok_or_else(|| Self::surface_error("page not found"))?;
         page.webview.focus()?;
         page.surface.focused = true;
+        window.input.focused_surface = FocusOwner::Page(page_id);
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit focus_changed: page={page_id:?}");
         Ok(())
@@ -304,6 +367,10 @@ impl Runtime {
                 _ => {}
             }
             browserkit_wry::pump_events();
+            let window_ids: Vec<_> = windows.keys().copied().collect();
+            for window_id in window_ids {
+                let _ = handle_chrome_commands(&mut windows, window_id);
+            }
         })
     }
 
@@ -346,6 +413,7 @@ impl Runtime {
             page.surface.visible = true;
             page.surface.focused = true;
             page.webview.focus()?;
+            window.input.focused_surface = FocusOwner::Page(page_id);
             return Ok(());
         }
         if let Some(old_id) = window.active_page {
@@ -372,15 +440,51 @@ impl Runtime {
         }
         window.pages.get_mut(&page_id).unwrap().surface.z_order = 1;
         window.active_page = Some(page_id);
+        window.input.focused_surface = FocusOwner::Page(page_id);
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit page_activated: page={page_id:?}");
         Ok(())
     }
 }
 
+fn handle_chrome_commands(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+) -> Result<()> {
+    let commands = {
+        let window = windows
+            .get_mut(&window_id)
+            .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
+        let chrome = window
+            .chrome
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::Surface, "chrome surface is not available"))?;
+        window.input.focused_surface = FocusOwner::Chrome;
+        chrome.webview.drain_commands()
+    };
+    for command in commands {
+        let active_page = windows
+            .get(&window_id)
+            .and_then(|window| window.active_page);
+        if let Some(page_id) = active_page {
+            let page = windows
+                .get(&window_id)
+                .and_then(|window| window.pages.get(&page_id))
+                .ok_or_else(|| Error::new(ErrorKind::Surface, "active page not found"))?;
+            match command {
+                ChromeCommand::Back => page.webview.go_back()?,
+                ChromeCommand::Forward => page.webview.go_forward()?,
+                ChromeCommand::Reload => page.webview.reload()?,
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_resize(window: &mut RuntimeWindow, physical_size: PhysicalSize<u32>) {
     let logical_size = physical_size.to_logical::<f64>(window.scale_factor);
     let bounds = content_bounds(logical_size.width, logical_size.height);
+    let chrome_bounds = chrome_bounds(logical_size.width);
     #[cfg(debug_assertions)]
     eprintln!(
         "BrowserKit resize: physical={}x{} scale={} logical={}x{} page={bounds:?}",
@@ -400,6 +504,24 @@ fn apply_resize(window: &mut RuntimeWindow, physical_size: PhysicalSize<u32>) {
         if page.surface.bounds != bounds {
             let _ = page.webview.set_bounds(bounds);
             page.surface.bounds = bounds;
+        }
+    }
+    if let Some(chrome) = &mut window.chrome {
+        if chrome.surface.bounds != chrome_bounds {
+            match chrome.webview.set_bounds(chrome_bounds) {
+                Ok(_) => {
+                    chrome.surface.bounds = chrome_bounds;
+                    #[cfg(debug_assertions)]
+                    eprintln!("BrowserKit chrome_bounds_applied: {chrome_bounds:?}");
+                }
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("BrowserKit chrome_bounds_failed: {error}");
+                }
+            }
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("BrowserKit chrome_bounds_deduplicated");
         }
     }
     #[cfg(target_os = "linux")]
@@ -422,6 +544,15 @@ fn content_bounds(width: f64, height: f64) -> LogicalRect {
     }
 }
 
+fn chrome_bounds(width: f64) -> LogicalRect {
+    LogicalRect {
+        x: 0.0,
+        y: 0.0,
+        width: width.max(0.0),
+        height: 56.0,
+    }
+}
+
 #[cfg(test)]
 fn content_bounds_from_physical(width: u32, height: u32, scale_factor: f64) -> LogicalRect {
     let logical = PhysicalSize::new(width, height).to_logical::<f64>(scale_factor);
@@ -431,13 +562,41 @@ fn content_bounds_from_physical(width: u32, height: u32, scale_factor: f64) -> L
 #[cfg(test)]
 mod tests {
     use super::{
-        content_bounds, content_bounds_from_physical, PageSurface, PageSurfaceId, SurfaceLifecycle,
+        chrome_bounds, content_bounds, content_bounds_from_physical, ChromeSurface,
+        ChromeSurfaceId, PageSurface, PageSurfaceId, SurfaceLifecycle,
     };
     use browserkit_types::LogicalRect;
     #[test]
     fn bounds_do_not_underflow_small_windows() {
         assert_eq!(content_bounds(8.0, 8.0).width, 0.0);
         assert_eq!(content_bounds(8.0, 8.0).height, 0.0);
+    }
+
+    #[test]
+    fn chrome_bounds_use_window_logical_width() {
+        assert_eq!(
+            chrome_bounds(1200.0),
+            LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 56.0,
+            }
+        );
+        assert_eq!(chrome_bounds(-1.0).width, 0.0);
+    }
+
+    #[test]
+    fn chrome_surface_is_window_owned_and_focusable() {
+        let surface = ChromeSurface {
+            id: ChromeSurfaceId(1),
+            bounds: chrome_bounds(1200.0),
+            visible: true,
+            focused: false,
+        };
+        assert_eq!(surface.id, ChromeSurfaceId(1));
+        assert!(surface.visible);
+        assert!(!surface.focused);
     }
 
     #[test]

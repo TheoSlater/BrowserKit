@@ -9,11 +9,17 @@ pub(crate) enum HitTestTarget {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum FocusOwner {
-    Page,
+    Page(browserkit_types::PageId),
     Chrome,
+    #[default]
     None,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct InputCoordinator {
+    pub(crate) focused_surface: FocusOwner,
 }
 
 // Cursor ownership will be arbitrated by BrowserKit between native surfaces.

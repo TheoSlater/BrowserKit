@@ -5,7 +5,7 @@ fn main() -> browserkit::Result<()> {
     {
         let mut window = browser.create_window(WindowOptions {
             title: "BrowserKit M0-B2".into(),
-            debug_native_overlay: true,
+            debug_native_overlay: false,
             ..Default::default()
         })?;
         let page_a = window.create_page(PageOptions {
