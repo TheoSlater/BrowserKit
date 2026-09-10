@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use browserkit_types::{LogicalRect, Result};
+use browserkit_types::{LogicalRect, PageId, Result};
 use tao::window::Window;
 use wry::{
     dpi::{LogicalPosition, LogicalSize},
@@ -13,11 +13,12 @@ pub struct WebView {
     bounds: Option<LogicalRect>,
     requested: Rc<RefCell<Option<LogicalRect>>>,
     surface_name: &'static str,
+    events: super::PageEventQueue,
 }
 
 pub struct ChromeWebView {
     webview: WebView,
-    commands: Rc<RefCell<Vec<super::ChromeCommand>>>,
+    messages: Rc<RefCell<Vec<String>>>,
 }
 
 pub struct NativeRoot {
@@ -95,6 +96,25 @@ impl NativeRoot {
     }
 
     #[cfg(target_os = "linux")]
+    pub fn allocated_size(&self) -> Option<(f64, f64)> {
+        use gtk::prelude::*;
+        let allocation = self.fixed.allocation();
+        if allocation.width() > 0 && allocation.height() > 0 {
+            Some((
+                f64::from(allocation.width()),
+                f64::from(allocation.height()),
+            ))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn allocated_size(&self) -> Option<(f64, f64)> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn add_debug_overlay(&mut self) -> Result<()> {
         if self.overlay.is_some() {
             return Ok(());
@@ -138,16 +158,14 @@ impl ChromeWebView {
     pub fn new(window: &Window, root: &NativeRoot) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let _ = window;
-        let commands = Rc::new(RefCell::new(Vec::new()));
-        let command_queue = Rc::clone(&commands);
+        let messages = Rc::new(RefCell::new(Vec::new()));
+        let message_queue = Rc::clone(&messages);
         let builder = WebViewBuilder::new()
             .with_html(CHROME_HTML)
             .with_ipc_handler(move |request| {
-                if let Some(command) = parse_chrome_command(request.body()) {
-                    #[cfg(debug_assertions)]
-                    eprintln!("BrowserKit chrome_command_received: {command:?}");
-                    command_queue.borrow_mut().push(command);
-                }
+                #[cfg(debug_assertions)]
+                eprintln!("BrowserKit ipc_received");
+                message_queue.borrow_mut().push(request.body().to_owned());
             });
         #[cfg(target_os = "linux")]
         use wry::WebViewBuilderExtUnix;
@@ -158,8 +176,8 @@ impl ChromeWebView {
         #[cfg(not(target_os = "linux"))]
         let inner = builder.build_as_child(window).map_err(super::map_error)?;
         Ok(Self {
-            webview: WebView::from_inner(inner, "Chrome"),
-            commands,
+            webview: WebView::from_inner(inner, "Chrome", Rc::new(RefCell::new(Vec::new()))),
+            messages,
         })
     }
 
@@ -177,21 +195,18 @@ impl ChromeWebView {
         self.webview.focus()
     }
 
-    pub fn drain_commands(&self) -> Vec<super::ChromeCommand> {
-        self.commands.borrow_mut().drain(..).collect()
+    pub fn drain_messages(&self) -> Vec<String> {
+        self.messages.borrow_mut().drain(..).collect()
     }
-}
 
-fn parse_chrome_command(body: &str) -> Option<super::ChromeCommand> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("type")?.as_str()? != "browserkit.command" {
-        return None;
-    }
-    match value.get("command")?.as_str()? {
-        "back" => Some(super::ChromeCommand::Back),
-        "forward" => Some(super::ChromeCommand::Forward),
-        "reload" => Some(super::ChromeCommand::Reload),
-        _ => None,
+    pub fn send_message(&self, message: &browserkit_types::NativeMessage) -> Result<()> {
+        let json = serde_json::to_string(message).map_err(|error| {
+            super::map_error(format!("failed to serialize chrome message: {error}"))
+        })?;
+        self.webview
+            .inner
+            .evaluate_script(&format!("window.__browserkit.receive({json});"))
+            .map_err(super::map_error)
     }
 }
 
@@ -203,26 +218,127 @@ const CHROME_HTML: &str = r#"<!doctype html>
   .toolbar { box-sizing: border-box; height: 56px; display: flex; align-items: center;
     gap: 8px; padding: 8px 16px; }
   button { padding: 7px 12px; }
+  input { width: 280px; padding: 7px; }
   span { margin-left: 8px; font-weight: 600; }
 </style>
 <div class="toolbar">
-  <button onclick="command('back')">Back</button>
-  <button onclick="command('forward')">Forward</button>
-  <button onclick="command('reload')">Reload</button>
+  <button id="back">Back</button>
+  <button id="forward">Forward</button>
+  <button id="reload">Reload</button>
+  <input id="url" placeholder="https://example.com">
+  <button id="go">Go</button>
+  <button id="new-page">New Page</button>
   <span>BrowserKit Chrome</span>
 </div>
 <script>
-  function command(command) {
-    window.ipc.postMessage(JSON.stringify({type: 'browserkit.command', command}));
+  const state = { activePageId: null, pages: new Map() };
+  let nextRequestId = 1;
+  function send(command) {
+    window.ipc.postMessage(JSON.stringify({type: 'command', command}));
   }
+  function request(request, onResponse) {
+    const id = 'req-' + nextRequestId++;
+    window.__browserkit.pending.set(id, onResponse);
+    window.ipc.postMessage(JSON.stringify({type: 'request', id, request}));
+  }
+  function activePage() { return state.pages.get(state.activePageId); }
+  function render() {
+    const page = activePage();
+    document.getElementById('back').disabled = !page || !page.canGoBack;
+    document.getElementById('forward').disabled = !page || !page.canGoForward;
+    document.getElementById('reload').disabled = !page;
+    document.getElementById('url').value = page && page.url || '';
+  }
+  function updatePage(page) {
+    state.pages.set(page.pageId, page);
+    if (page.active) state.activePageId = page.pageId;
+    render();
+  }
+  window.__browserkit = {
+    pending: new Map(),
+    receive(message) {
+      if (message.type === 'response') {
+        const callback = this.pending.get(message.id);
+        this.pending.delete(message.id);
+        if (callback) callback(message);
+        return;
+      }
+      if (message.type !== 'event') return;
+      const event = message.event;
+      if (event.type === 'page.created' || event.type === 'page.activated') {
+        updatePage(event.state);
+      } else if (event.type === 'page.closed') {
+        state.pages.delete(event.pageId);
+        if (state.activePageId === event.pageId) state.activePageId = null;
+        render();
+      } else {
+        const page = state.pages.get(event.pageId);
+        if (!page) return;
+        if (event.type === 'page.url_changed') page.url = event.url;
+        if (event.type === 'page.title_changed') page.title = event.title;
+        if (event.type === 'page.loading_changed') page.loading = event.loading;
+        if (event.type === 'page.navigation_state_changed') {
+          page.canGoBack = event.canGoBack;
+          page.canGoForward = event.canGoForward;
+        }
+        render();
+      }
+    }
+  };
+  document.getElementById('back').onclick = () => send({type: 'page.go_back'});
+  document.getElementById('forward').onclick = () => send({type: 'page.go_forward'});
+  document.getElementById('reload').onclick = () => send({type: 'page.reload'});
+  document.getElementById('go').onclick = () => {
+    const url = document.getElementById('url').value;
+    send({type: 'page.navigate', url});
+  };
+  document.getElementById('new-page').onclick = () => request(
+    {type: 'page.create', url: 'https://example.com'},
+    response => {
+      if (response.ok) send({type: 'page.activate', pageId: response.data.pageId});
+    }
+  );
+  request({type: 'window.get_state'}, response => {
+    if (!response.ok) return;
+    state.activePageId = response.data.state.activePageId;
+    response.data.state.pages.forEach(page => state.pages.set(page.pageId, page));
+    render();
+  });
+  render();
 </script>"#;
 
 impl WebView {
-    pub fn new(_window: &Window, root: &NativeRoot, url: Option<&str>) -> Result<Self> {
+    pub fn new(
+        _window: &Window,
+        root: &NativeRoot,
+        url: Option<&str>,
+        page_id: PageId,
+        events: super::PageEventQueue,
+    ) -> Result<Self> {
         let mut builder = WebViewBuilder::new();
         if let Some(url) = url {
             builder = builder.with_url(url);
         }
+        let title_events = events.clone();
+        builder = builder.with_document_title_changed_handler(move |title| {
+            title_events
+                .borrow_mut()
+                .push((page_id, super::PageEvent::TitleChanged(Some(title))));
+        });
+        let load_events = events.clone();
+        builder = builder.with_on_page_load_handler(move |event, url| {
+            let mut events = load_events.borrow_mut();
+            match event {
+                wry::PageLoadEvent::Started => {
+                    events.push((page_id, super::PageEvent::UrlChanged(Some(url))));
+                    events.push((page_id, super::PageEvent::LoadingChanged(true)));
+                }
+                wry::PageLoadEvent::Finished => {
+                    events.push((page_id, super::PageEvent::UrlChanged(Some(url))));
+                    events.push((page_id, super::PageEvent::LoadingChanged(false)));
+                }
+            }
+        });
         #[cfg(target_os = "linux")]
         use wry::WebViewBuilderExtUnix;
 
@@ -230,10 +346,14 @@ impl WebView {
         let inner = builder.build_gtk(&root.fixed).map_err(super::map_error)?;
         #[cfg(not(target_os = "linux"))]
         let inner = builder.build_as_child(_window).map_err(super::map_error)?;
-        Ok(Self::from_inner(inner, "Page"))
+        Ok(Self::from_inner(inner, "Page", events))
     }
 
-    fn from_inner(inner: wry::WebView, surface_name: &'static str) -> Self {
+    fn from_inner(
+        inner: wry::WebView,
+        surface_name: &'static str,
+        events: super::PageEventQueue,
+    ) -> Self {
         let requested: Rc<RefCell<Option<LogicalRect>>> = Rc::new(RefCell::new(None));
         #[cfg(target_os = "linux")]
         {
@@ -283,6 +403,7 @@ impl WebView {
             bounds: None,
             requested,
             surface_name,
+            events,
         }
     }
 
@@ -300,6 +421,29 @@ impl WebView {
 
     pub fn reload(&self) -> Result<()> {
         self.inner.reload().map_err(super::map_error)
+    }
+
+    pub fn can_go_back(&self) -> Result<bool> {
+        self.inner.can_go_back().map_err(super::map_error)
+    }
+
+    pub fn can_go_forward(&self) -> Result<bool> {
+        self.inner.can_go_forward().map_err(super::map_error)
+    }
+
+    pub fn drain_events(&self, page_id: PageId) -> Vec<super::PageEvent> {
+        let mut events = self.events.borrow_mut();
+        let mut page_events = Vec::new();
+        let mut remaining = Vec::with_capacity(events.len());
+        for (id, event) in events.drain(..) {
+            if id == page_id {
+                page_events.push(event);
+            } else {
+                remaining.push((id, event));
+            }
+        }
+        *events = remaining;
+        page_events
     }
 
     pub fn set_bounds(&mut self, bounds: LogicalRect) -> Result<()> {
@@ -368,17 +512,7 @@ impl WebView {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{parse_chrome_command, DEBUG_OVERLAY_BOUNDS};
-
-    #[test]
-    fn chrome_commands_accept_only_supported_messages() {
-        assert_eq!(
-            parse_chrome_command(r#"{"type":"browserkit.command","command":"reload"}"#),
-            Some(super::super::ChromeCommand::Reload)
-        );
-        assert_eq!(parse_chrome_command(r#"{"command":"reload"}"#), None);
-        assert_eq!(parse_chrome_command("not-json"), None);
-    }
+    use super::DEBUG_OVERLAY_BOUNDS;
 
     #[test]
     fn debug_overlay_geometry_is_logical_and_valid() {

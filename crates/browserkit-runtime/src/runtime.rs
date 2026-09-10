@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
 use browserkit_types::{
-    BrowserOptions, Error, ErrorKind, LogicalRect, PageId, PageOptions, Result, WindowId,
-    WindowOptions,
+    BrowserOptions, Command, Error, ErrorKind, Event, FrontendMessage, LogicalRect, NativeMessage,
+    PageId, PageOptions, PageState, ProtocolError, Request, ResponseData, Result, WindowId,
+    WindowOptions, WindowState,
 };
 use browserkit_wry::{
-    ChromeCommand, ChromeWebView, NativeRoot, PlatformBackend, WebView, WryBackend,
+    ChromeWebView, NativeRoot, PageEvent, PageEventQueue, PlatformBackend, WebView, WryBackend,
 };
 use tao::{
     dpi::PhysicalSize,
-    event::{Event, WindowEvent},
+    event::{Event as TaoEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
@@ -22,6 +23,7 @@ pub struct Runtime {
     next_id: u64,
     next_surface_id: u64,
     backend: WryBackend,
+    page_events: PageEventQueue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,6 +91,7 @@ struct RuntimeWindow {
 struct RuntimePage {
     webview: WebView,
     surface: PageSurface,
+    state: PageState,
 }
 
 struct RuntimeChrome {
@@ -105,6 +108,7 @@ impl Runtime {
             next_id: 1,
             next_surface_id: 1,
             backend: WryBackend,
+            page_events: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         })
     }
 
@@ -137,78 +141,26 @@ impl Runtime {
 
     pub fn create_page(&mut self, window_id: WindowId, options: PageOptions) -> Result<PageId> {
         let page_id = PageId::new(self.next_id());
-        let window = self
-            .windows
-            .get_mut(&window_id)
-            .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
-        if options.host_mode == browserkit_types::WebViewHostMode::Composition
-            && window.chrome.is_none()
-        {
-            let chrome = self
-                .backend
-                .create_chrome(&window.window, &mut window.root)?;
-            window.chrome = Some(RuntimeChrome {
-                webview: chrome,
-                surface: ChromeSurface {
-                    id: ChromeSurfaceId(self.next_surface_id),
-                    bounds: LogicalRect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
-                    },
-                    visible: true,
-                    focused: false,
-                },
-            });
-            self.next_surface_id += 1;
-            #[cfg(debug_assertions)]
-            eprintln!("BrowserKit chrome_created");
-        }
-        let webview = self.backend.create_page(
-            &window.window,
-            &mut window.root,
-            &options,
-            window.debug_native_overlay,
-        )?;
         let surface_id = PageSurfaceId(self.next_surface_id);
         self.next_surface_id += 1;
+        let page_events = self.page_events.clone();
+        let backend = self.backend;
         let window = self
             .windows
             .get_mut(&window_id)
             .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
-        let active = window.active_page.is_none();
-        let surface = PageSurface {
-            id: surface_id,
-            page_id,
-            bounds: LogicalRect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
-            visible: active,
-            focused: active,
-            z_order: if active { 1 } else { 0 },
-            lifecycle: if active {
-                SurfaceLifecycle::Visible
-            } else {
-                SurfaceLifecycle::Hidden
-            },
-        };
-        if !active {
-            webview.set_visible(false)?;
-            webview.set_interactive(false)?;
-        } else {
-            webview.set_interactive(true)?;
-            window.active_page = Some(page_id);
-        }
-        window
-            .pages
-            .insert(page_id, RuntimePage { webview, surface });
+        let page =
+            create_page_surface(window, &backend, &options, page_id, surface_id, page_events)?;
+        window.pages.insert(page_id, page);
         window.page_order.push(page_id);
         let initial_size = window.window.inner_size();
         apply_resize(window, initial_size);
+        emit_event(
+            window,
+            Event::PageCreated {
+                state: window.pages[&page_id].state.clone(),
+            },
+        );
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit page_created: page={page_id:?} surface={surface_id:?}");
         Ok(page_id)
@@ -255,6 +207,7 @@ impl Runtime {
         if !visible && window.active_page == Some(page_id) {
             window.active_page = None;
             page.surface.focused = false;
+            page.state.active = false;
         }
         if visible {
             window.input.focused_surface = FocusOwner::Page(page_id);
@@ -276,6 +229,7 @@ impl Runtime {
             .ok_or_else(|| Self::surface_error("page not found"))?;
         page.webview.focus()?;
         page.surface.focused = true;
+        page.state.active = true;
         window.input.focused_surface = FocusOwner::Page(page_id);
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit focus_changed: page={page_id:?}");
@@ -297,6 +251,7 @@ impl Runtime {
         let was_active = window.active_page == Some(page_id);
         let mut surface = page.surface;
         surface.destroy();
+        emit_event(window, Event::PageClosed { page_id });
         #[cfg(debug_assertions)]
         eprintln!(
             "BrowserKit page_destroyed: page={page_id:?} surface={:?}",
@@ -313,6 +268,9 @@ impl Runtime {
                 Self::activate_page_in_window(window, next)?;
             }
         }
+        if window.active_page.is_none() {
+            window.input.focused_surface = FocusOwner::None;
+        }
         Ok(())
     }
 
@@ -320,12 +278,15 @@ impl Runtime {
         let Runtime {
             event_loop,
             mut windows,
-            ..
+            mut next_id,
+            mut next_surface_id,
+            backend,
+            page_events,
         } = self;
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Wait;
             match event {
-                Event::WindowEvent {
+                TaoEvent::WindowEvent {
                     window_id,
                     event: WindowEvent::Resized(size),
                     ..
@@ -337,7 +298,7 @@ impl Runtime {
                         apply_resize(window, size);
                     }
                 }
-                Event::WindowEvent {
+                TaoEvent::WindowEvent {
                     window_id,
                     event:
                         WindowEvent::ScaleFactorChanged {
@@ -354,7 +315,7 @@ impl Runtime {
                         apply_resize(window, *new_inner_size);
                     }
                 }
-                Event::WindowEvent {
+                TaoEvent::WindowEvent {
                     window_id,
                     event: WindowEvent::CloseRequested,
                     ..
@@ -367,9 +328,22 @@ impl Runtime {
                 _ => {}
             }
             browserkit_wry::pump_events();
+            process_page_events(&mut windows, &page_events);
+            for window in windows.values_mut() {
+                if let Some((width, height)) = window.root.allocated_size() {
+                    reconcile_layout(window, width, height);
+                }
+            }
             let window_ids: Vec<_> = windows.keys().copied().collect();
             for window_id in window_ids {
-                let _ = handle_chrome_commands(&mut windows, window_id);
+                let _ = handle_chrome_messages(
+                    &mut windows,
+                    window_id,
+                    &backend,
+                    &mut next_id,
+                    &mut next_surface_id,
+                    page_events.clone(),
+                );
             }
         })
     }
@@ -412,6 +386,7 @@ impl Runtime {
             page.webview.set_interactive(true)?;
             page.surface.visible = true;
             page.surface.focused = true;
+            page.state.active = true;
             page.webview.focus()?;
             window.input.focused_surface = FocusOwner::Page(page_id);
             return Ok(());
@@ -421,6 +396,7 @@ impl Runtime {
                 old.webview.set_visible(false)?;
                 old.webview.set_interactive(false)?;
                 old.surface.set_visible(false);
+                old.state.active = false;
                 #[cfg(debug_assertions)]
                 eprintln!("BrowserKit page_hidden: page={old_id:?}");
             }
@@ -432,6 +408,7 @@ impl Runtime {
             page.webview.focus()?;
             page.surface.set_visible(true);
             page.surface.focused = true;
+            page.state.active = true;
         }
         for other in window.pages.values_mut() {
             if other.surface.page_id != page_id {
@@ -441,17 +418,103 @@ impl Runtime {
         window.pages.get_mut(&page_id).unwrap().surface.z_order = 1;
         window.active_page = Some(page_id);
         window.input.focused_surface = FocusOwner::Page(page_id);
+        if let Some(state) = window.pages.get(&page_id).map(|page| page.state.clone()) {
+            emit_event(window, Event::PageActivated { state });
+        }
         #[cfg(debug_assertions)]
         eprintln!("BrowserKit page_activated: page={page_id:?}");
         Ok(())
     }
 }
 
-fn handle_chrome_commands(
+fn create_page_surface(
+    window: &mut RuntimeWindow,
+    backend: &WryBackend,
+    options: &PageOptions,
+    page_id: PageId,
+    surface_id: PageSurfaceId,
+    events: PageEventQueue,
+) -> Result<RuntimePage> {
+    if options.host_mode == browserkit_types::WebViewHostMode::Composition
+        && window.chrome.is_none()
+    {
+        let chrome = backend.create_chrome(&window.window, &mut window.root)?;
+        window.chrome = Some(RuntimeChrome {
+            webview: chrome,
+            surface: ChromeSurface {
+                id: ChromeSurfaceId(0),
+                bounds: LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                visible: true,
+                focused: false,
+            },
+        });
+        #[cfg(debug_assertions)]
+        eprintln!("BrowserKit chrome_created");
+    }
+    let webview = backend.create_page(
+        &window.window,
+        &mut window.root,
+        options,
+        window.debug_native_overlay,
+        page_id,
+        events,
+    )?;
+    let active = window.active_page.is_none();
+    if !active {
+        webview.set_visible(false)?;
+        webview.set_interactive(false)?;
+    } else {
+        webview.set_interactive(true)?;
+        window.active_page = Some(page_id);
+    }
+    let state = PageState {
+        id: page_id,
+        url: options.url.clone(),
+        title: None,
+        loading: options.url.is_some(),
+        can_go_back: false,
+        can_go_forward: false,
+        active,
+    };
+    let surface = PageSurface {
+        id: surface_id,
+        page_id,
+        bounds: LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        },
+        visible: active,
+        focused: active,
+        z_order: if active { 1 } else { 0 },
+        lifecycle: if active {
+            SurfaceLifecycle::Visible
+        } else {
+            SurfaceLifecycle::Hidden
+        },
+    };
+    Ok(RuntimePage {
+        webview,
+        surface,
+        state,
+    })
+}
+
+fn handle_chrome_messages(
     windows: &mut HashMap<WindowId, RuntimeWindow>,
     window_id: WindowId,
+    backend: &WryBackend,
+    next_id: &mut u64,
+    next_surface_id: &mut u64,
+    page_events: PageEventQueue,
 ) -> Result<()> {
-    let commands = {
+    let messages = {
         let window = windows
             .get_mut(&window_id)
             .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
@@ -460,45 +523,352 @@ fn handle_chrome_commands(
             .as_ref()
             .ok_or_else(|| Error::new(ErrorKind::Surface, "chrome surface is not available"))?;
         window.input.focused_surface = FocusOwner::Chrome;
-        chrome.webview.drain_commands()
+        chrome.webview.drain_messages()
     };
-    for command in commands {
-        let active_page = windows
-            .get(&window_id)
-            .and_then(|window| window.active_page);
-        if let Some(page_id) = active_page {
-            let page = windows
-                .get(&window_id)
-                .and_then(|window| window.pages.get(&page_id))
-                .ok_or_else(|| Error::new(ErrorKind::Surface, "active page not found"))?;
-            match command {
-                ChromeCommand::Back => page.webview.go_back()?,
-                ChromeCommand::Forward => page.webview.go_forward()?,
-                ChromeCommand::Reload => page.webview.reload()?,
+    for raw in messages {
+        match crate::ipc::parse_message(&raw) {
+            Ok(message) => {
+                #[cfg(debug_assertions)]
+                eprintln!("BrowserKit ipc_parsed");
+                if let Err(error) = dispatch_message(
+                    windows,
+                    window_id,
+                    message,
+                    backend,
+                    next_id,
+                    next_surface_id,
+                    page_events.clone(),
+                ) {
+                    #[cfg(debug_assertions)]
+                    eprintln!("BrowserKit ipc_error: {}", error.code);
+                }
+            }
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                eprintln!("BrowserKit ipc_rejected: {}", error.code);
             }
         }
     }
     Ok(())
 }
 
+fn dispatch_message(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    message: FrontendMessage,
+    backend: &WryBackend,
+    next_id: &mut u64,
+    next_surface_id: &mut u64,
+    page_events: PageEventQueue,
+) -> std::result::Result<(), ProtocolError> {
+    match message {
+        FrontendMessage::Command { command } => execute_command(windows, window_id, command),
+        FrontendMessage::Request { id, request } => {
+            let result = execute_request(
+                windows,
+                window_id,
+                request,
+                backend,
+                next_id,
+                next_surface_id,
+                page_events,
+            );
+            let response = match result {
+                Ok(data) => NativeMessage::Response {
+                    id,
+                    ok: true,
+                    data,
+                    error: None,
+                },
+                Err(error) => NativeMessage::Response {
+                    id,
+                    ok: false,
+                    data: None,
+                    error: Some(error),
+                },
+            };
+            send_to_chrome(windows, window_id, &response).map_err(protocol_from_error)
+        }
+    }
+}
+
+fn execute_command(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    command: Command,
+) -> std::result::Result<(), ProtocolError> {
+    match command {
+        Command::PageNavigate { page_id, url } => {
+            let page_id = resolve_page(windows, window_id, page_id)?;
+            validate_url(&url)?;
+            windows[&window_id].pages[&page_id]
+                .webview
+                .navigate(&url)
+                .map_err(protocol_from_error)
+        }
+        Command::PageReload { page_id } => {
+            let page_id = resolve_page(windows, window_id, page_id)?;
+            windows[&window_id].pages[&page_id]
+                .webview
+                .reload()
+                .map_err(protocol_from_error)
+        }
+        Command::PageGoBack { page_id } => {
+            let page_id = resolve_page(windows, window_id, page_id)?;
+            windows[&window_id].pages[&page_id]
+                .webview
+                .go_back()
+                .map_err(protocol_from_error)
+        }
+        Command::PageGoForward { page_id } => {
+            let page_id = resolve_page(windows, window_id, page_id)?;
+            windows[&window_id].pages[&page_id]
+                .webview
+                .go_forward()
+                .map_err(protocol_from_error)
+        }
+        Command::PageActivate { page_id } => {
+            let window = windows
+                .get_mut(&window_id)
+                .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+            Runtime::activate_page_in_window(window, page_id).map_err(protocol_from_error)
+        }
+        Command::PageClose { page_id } => {
+            close_page_in_window(windows, window_id, page_id).map_err(protocol_from_error)
+        }
+    }
+}
+
+fn execute_request(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    request: Request,
+    backend: &WryBackend,
+    next_id: &mut u64,
+    next_surface_id: &mut u64,
+    page_events: PageEventQueue,
+) -> std::result::Result<Option<ResponseData>, ProtocolError> {
+    match request {
+        Request::PageCreate { url } => {
+            if let Some(url) = &url {
+                validate_url(url)?;
+            }
+            let page_id = PageId::new(*next_id);
+            *next_id += 1;
+            let surface_id = PageSurfaceId(*next_surface_id);
+            *next_surface_id += 1;
+            let window = windows
+                .get_mut(&window_id)
+                .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+            let page = create_page_surface(
+                window,
+                backend,
+                &PageOptions {
+                    url,
+                    host_mode: browserkit_types::WebViewHostMode::Composition,
+                },
+                page_id,
+                surface_id,
+                page_events,
+            )
+            .map_err(protocol_from_error)?;
+            let state = page.state.clone();
+            window.pages.insert(page_id, page);
+            window.page_order.push(page_id);
+            let initial_size = window.window.inner_size();
+            apply_resize(window, initial_size);
+            emit_event(window, Event::PageCreated { state });
+            Ok(Some(ResponseData::PageCreated { page_id }))
+        }
+        Request::PageGetState { page_id } => {
+            let page_id = resolve_page(windows, window_id, page_id)?;
+            let state = windows[&window_id].pages[&page_id].state.clone();
+            Ok(Some(ResponseData::PageState { state }))
+        }
+        Request::WindowGetState => {
+            let window = windows
+                .get(&window_id)
+                .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+            Ok(Some(ResponseData::WindowState {
+                state: window_state(window),
+            }))
+        }
+    }
+}
+
+fn resolve_page(
+    windows: &HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    page_id: Option<PageId>,
+) -> std::result::Result<PageId, ProtocolError> {
+    let window = windows
+        .get(&window_id)
+        .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+    let page_id = page_id
+        .or(window.active_page)
+        .ok_or_else(|| error_for_protocol("no_active_page", "no active page"))?;
+    if window.pages.contains_key(&page_id) {
+        Ok(page_id)
+    } else {
+        Err(error_for_protocol("page_not_found", "page not found"))
+    }
+}
+
+fn validate_url(url: &str) -> std::result::Result<(), ProtocolError> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(error_for_protocol(
+            "invalid_url",
+            "URL must use http or https",
+        ))
+    }
+}
+
+fn error_for_protocol(code: &str, message: &str) -> ProtocolError {
+    ProtocolError {
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn protocol_from_error(error: Error) -> ProtocolError {
+    ProtocolError {
+        code: "request_failed".into(),
+        message: error.to_string(),
+    }
+}
+
+fn window_state(window: &RuntimeWindow) -> WindowState {
+    WindowState {
+        active_page_id: window.active_page,
+        pages: window
+            .page_order
+            .iter()
+            .filter_map(|page_id| window.pages.get(page_id).map(|page| page.state.clone()))
+            .collect(),
+    }
+}
+
+fn send_to_chrome(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    message: &NativeMessage,
+) -> Result<()> {
+    if let Some(chrome) = windows
+        .get(&window_id)
+        .and_then(|window| window.chrome.as_ref())
+    {
+        chrome.webview.send_message(message)?;
+        #[cfg(debug_assertions)]
+        eprintln!("BrowserKit chrome_message_sent");
+    }
+    Ok(())
+}
+
+fn emit_event(window: &mut RuntimeWindow, event: Event) {
+    #[cfg(debug_assertions)]
+    eprintln!("BrowserKit event_emitted");
+    let message = NativeMessage::Event { event };
+    if let Some(chrome) = window.chrome.as_ref() {
+        let _ = chrome.webview.send_message(&message);
+    }
+}
+
+fn close_page_in_window(
+    windows: &mut HashMap<WindowId, RuntimeWindow>,
+    window_id: WindowId,
+    page_id: PageId,
+) -> Result<()> {
+    let window = windows
+        .get_mut(&window_id)
+        .ok_or_else(|| Error::new(ErrorKind::Window, "window not found"))?;
+    let page = window
+        .pages
+        .remove(&page_id)
+        .ok_or_else(|| Error::new(ErrorKind::Surface, "page not found"))?;
+    window.page_order.retain(|id| *id != page_id);
+    let was_active = window.active_page == Some(page_id);
+    emit_event(window, Event::PageClosed { page_id });
+    if was_active {
+        window.active_page = None;
+        if let Some(next) = window.page_order.first().copied() {
+            Runtime::activate_page_in_window(window, next)?;
+        }
+    }
+    if window.active_page.is_none() {
+        window.input.focused_surface = FocusOwner::None;
+    }
+    drop(page);
+    Ok(())
+}
+
+fn process_page_events(windows: &mut HashMap<WindowId, RuntimeWindow>, events: &PageEventQueue) {
+    let events: Vec<_> = events.borrow_mut().drain(..).collect();
+    for (page_id, event) in events {
+        let Some(window_id) = windows.iter().find_map(|(window_id, window)| {
+            window.pages.contains_key(&page_id).then_some(*window_id)
+        }) else {
+            continue;
+        };
+        let mut emitted = Vec::new();
+        if let Some(window) = windows.get_mut(&window_id) {
+            if let Some(page) = window.pages.get_mut(&page_id) {
+                match event {
+                    PageEvent::UrlChanged(url) => {
+                        page.state.url = url.clone();
+                        emitted.push(Event::PageUrlChanged { page_id, url });
+                    }
+                    PageEvent::TitleChanged(title) => {
+                        page.state.title = title.clone();
+                        emitted.push(Event::PageTitleChanged { page_id, title });
+                    }
+                    PageEvent::LoadingChanged(loading) => {
+                        page.state.loading = loading;
+                        emitted.push(Event::PageLoadingChanged { page_id, loading });
+                    }
+                }
+                let can_go_back = page.webview.can_go_back().unwrap_or(false);
+                let can_go_forward = page.webview.can_go_forward().unwrap_or(false);
+                if page.state.can_go_back != can_go_back
+                    || page.state.can_go_forward != can_go_forward
+                {
+                    page.state.can_go_back = can_go_back;
+                    page.state.can_go_forward = can_go_forward;
+                    emitted.push(Event::PageNavigationStateChanged {
+                        page_id,
+                        can_go_back,
+                        can_go_forward,
+                    });
+                }
+            }
+            for event in emitted {
+                emit_event(window, event);
+            }
+        }
+    }
+}
+
 fn apply_resize(window: &mut RuntimeWindow, physical_size: PhysicalSize<u32>) {
     let logical_size = physical_size.to_logical::<f64>(window.scale_factor);
-    let bounds = content_bounds(logical_size.width, logical_size.height);
-    let chrome_bounds = chrome_bounds(logical_size.width);
     #[cfg(debug_assertions)]
     eprintln!(
-        "BrowserKit resize: physical={}x{} scale={} logical={}x{} page={bounds:?}",
+        "BrowserKit resize: physical={}x{} scale={} logical={}x{}",
         physical_size.width,
         physical_size.height,
         window.scale_factor,
         logical_size.width,
         logical_size.height,
     );
+    reconcile_layout(window, logical_size.width, logical_size.height);
+}
+
+fn reconcile_layout(window: &mut RuntimeWindow, width: f64, height: f64) {
+    let bounds = content_bounds(width, height);
+    let chrome_bounds = chrome_bounds(width);
     #[cfg(debug_assertions)]
-    if bounds.x + bounds.width > logical_size.width
-        || bounds.y + bounds.height > logical_size.height
-    {
-        eprintln!("BrowserKit warning: page bounds exceed logical window bounds");
+    if bounds.x + bounds.width > width || bounds.y + bounds.height > height {
+        eprintln!("BrowserKit warning: page bounds exceed GTK logical root bounds");
     }
     for page in window.pages.values_mut() {
         if page.surface.bounds != bounds {

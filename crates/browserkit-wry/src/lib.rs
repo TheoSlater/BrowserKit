@@ -4,12 +4,17 @@ mod webview;
 
 pub use webview::{ChromeWebView, NativeRoot, WebView};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChromeCommand {
-    Back,
-    Forward,
-    Reload,
+use browserkit_types::PageId;
+use std::{cell::RefCell, rc::Rc};
+
+#[derive(Debug, Clone)]
+pub enum PageEvent {
+    UrlChanged(Option<String>),
+    TitleChanged(Option<String>),
+    LoadingChanged(bool),
 }
+
+pub type PageEventQueue = Rc<RefCell<Vec<(PageId, PageEvent)>>>;
 
 use browserkit_types::{Error, ErrorKind, PageOptions, Result, WebViewHostMode};
 use tao::window::Window;
@@ -21,6 +26,8 @@ pub trait PlatformBackend {
         root: &mut NativeRoot,
         options: &PageOptions,
         debug_native_overlay: bool,
+        page_id: PageId,
+        events: PageEventQueue,
     ) -> Result<WebView>;
 
     fn create_chrome(&self, window: &Window, root: &mut NativeRoot) -> Result<ChromeWebView>;
@@ -36,9 +43,11 @@ impl PlatformBackend for WryBackend {
         root: &mut NativeRoot,
         options: &PageOptions,
         debug_native_overlay: bool,
+        page_id: PageId,
+        events: PageEventQueue,
     ) -> Result<WebView> {
         ensure_host_mode(options.host_mode)?;
-        let webview = WebView::new(window, root, options.url.as_deref())?;
+        let webview = WebView::new(window, root, options.url.as_deref(), page_id, events)?;
         #[cfg(target_os = "linux")]
         if options.host_mode == WebViewHostMode::Composition && debug_native_overlay {
             root.add_debug_overlay()?;
