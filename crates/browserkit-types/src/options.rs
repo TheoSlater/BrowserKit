@@ -8,6 +8,8 @@ pub struct WindowOptions {
     pub title: String,
     pub width: u32,
     pub height: u32,
+    /// Show BrowserKit's Linux-only native overlay smoke widget.
+    pub debug_native_overlay: bool,
 }
 
 impl Default for WindowOptions {
@@ -16,6 +18,7 @@ impl Default for WindowOptions {
             title: "BrowserKit".into(),
             width: 1200,
             height: 800,
+            debug_native_overlay: false,
         }
     }
 }
@@ -52,5 +55,6 @@ mod tests {
             PageOptions::default().host_mode,
             WebViewHostMode::NativeChild
         );
+        assert!(!WindowOptions::default().debug_native_overlay);
     }
 }

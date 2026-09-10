@@ -49,9 +49,20 @@ impl Window<'_> {
             id,
         })
     }
+
+    pub fn set_active_page(&mut self, page_id: PageId) -> Result<()> {
+        self.browser.runtime.set_active_page(self.id, page_id)
+    }
+
+    pub fn close_page(&mut self, page_id: PageId) -> Result<()> {
+        self.browser.runtime.close_page(self.id, page_id)
+    }
 }
 
 impl Page<'_> {
+    pub fn id(&self) -> PageId {
+        self.id
+    }
     pub fn navigate(&self, url: &str) -> Result<()> {
         self.browser.runtime.navigate(self.window_id, self.id, url)
     }
@@ -60,12 +71,12 @@ impl Page<'_> {
             .runtime
             .set_bounds(self.window_id, self.id, bounds)
     }
-    pub fn set_visible(&self, visible: bool) -> Result<()> {
+    pub fn set_visible(&mut self, visible: bool) -> Result<()> {
         self.browser
             .runtime
             .set_visible(self.window_id, self.id, visible)
     }
-    pub fn focus(&self) -> Result<()> {
+    pub fn focus(&mut self) -> Result<()> {
         self.browser.runtime.focus(self.window_id, self.id)
     }
 }

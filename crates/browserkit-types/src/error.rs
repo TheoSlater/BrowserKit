@@ -6,6 +6,7 @@ pub enum ErrorKind {
     WebView,
     Geometry,
     UnsupportedHostMode,
+    Surface,
 }
 
 /// BrowserKit error.

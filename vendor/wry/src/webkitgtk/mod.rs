@@ -985,7 +985,8 @@ impl InnerWebView {
       {
         fixed.move_(&self.webview, x, y);
       }
-      self.webview.set_size_request(width, height);
+      // BrowserKit owns a fixed root whose allocation is authoritative. Updating
+      // the child's request here feeds its preferred size back into GtkWindow.
       self
         .webview
         .size_allocate(&gtk::Allocation::new(x, y, width, height));

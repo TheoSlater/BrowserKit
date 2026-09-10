@@ -9,4 +9,5 @@ members = [
   "crates/browserkit-wry",
   "crates/browserkit-types",
   "examples/native",
+  "examples/compositor-smoke",
 ]

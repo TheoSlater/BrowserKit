@@ -11,8 +11,9 @@ pub trait PlatformBackend {
     fn create_page(
         &self,
         window: &Window,
-        root: &NativeRoot,
+        root: &mut NativeRoot,
         options: &PageOptions,
+        debug_native_overlay: bool,
     ) -> Result<WebView>;
 }
 
@@ -23,22 +24,36 @@ impl PlatformBackend for WryBackend {
     fn create_page(
         &self,
         window: &Window,
-        root: &NativeRoot,
+        root: &mut NativeRoot,
         options: &PageOptions,
+        debug_native_overlay: bool,
     ) -> Result<WebView> {
         ensure_host_mode(options.host_mode)?;
-        WebView::new(window, root, options.url.as_deref())
+        let webview = WebView::new(window, root, options.url.as_deref())?;
+        #[cfg(target_os = "linux")]
+        if options.host_mode == WebViewHostMode::Composition && debug_native_overlay {
+            root.add_debug_overlay()?;
+        }
+        Ok(webview)
     }
 }
 
 fn ensure_host_mode(mode: WebViewHostMode) -> Result<()> {
-    if mode == WebViewHostMode::Composition {
-        Err(Error::new(
-            ErrorKind::UnsupportedHostMode,
-            "Composition host mode is not implemented",
-        ))
-    } else {
-        Ok(())
+    match mode {
+        WebViewHostMode::NativeChild => Ok(()),
+        WebViewHostMode::Composition => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(Error::new(
+                    ErrorKind::UnsupportedHostMode,
+                    "Composition host mode is only implemented on Linux",
+                ))
+            }
+        }
     }
 }
 
@@ -78,7 +93,10 @@ mod tests {
 
     #[test]
     fn composition_is_explicitly_unsupported() {
-        assert!(ensure_host_mode(WebViewHostMode::Composition).is_err());
         assert!(ensure_host_mode(WebViewHostMode::NativeChild).is_ok());
+        #[cfg(target_os = "linux")]
+        assert!(ensure_host_mode(WebViewHostMode::Composition).is_ok());
+        #[cfg(not(target_os = "linux"))]
+        assert!(ensure_host_mode(WebViewHostMode::Composition).is_err());
     }
 }

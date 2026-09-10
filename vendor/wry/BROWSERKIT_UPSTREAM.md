@@ -15,3 +15,5 @@
 ## BrowserKit-specific patches
 
 - Cargo feature declaration `v2_42` added so existing conditional code is checked without an `unexpected_cfgs` warning.
+- M0-B1 adds no new Wry source patch; composition uses existing `build_gtk` plus BrowserKit-owned GTK widgets.
+- BrowserKit-specific Linux patch: `GtkFixed` bound updates retain `move_` and `size_allocate` but omit per-update `set_size_request`; child requests otherwise feed back into the toplevel allocation and cause runaway resize.

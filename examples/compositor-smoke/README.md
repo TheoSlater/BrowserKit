@@ -1,4 +1,4 @@
-# Compositor smoke scaffolding
+# Linux compositor smoke
 
-Reserved for M0-B diagnostics. M0-A.5 intentionally has no composition host or renderer.
-Future checks: native child, composition host, resize, focus, visibility, multiple surfaces.
+M0-B2 proof: two Linux composition-hosted pages, repeated activation, page destruction, and
+BrowserKit's native GTK overlay. Run with `cargo run -p compositor-smoke`.
