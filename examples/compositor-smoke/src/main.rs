@@ -6,6 +6,7 @@ fn main() -> browserkit::Result<()> {
         let mut window = browser.create_window(WindowOptions {
             title: "BrowserKit M0-B2".into(),
             debug_native_overlay: false,
+            frontend_url: std::env::var("BROWSERKIT_FRONTEND_URL").ok(),
             ..Default::default()
         })?;
         let page_a = window.create_page(PageOptions {

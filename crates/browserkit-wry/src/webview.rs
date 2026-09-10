@@ -23,6 +23,8 @@ pub struct ChromeWebView {
 
 pub struct NativeRoot {
     #[cfg(target_os = "linux")]
+    overlay_host: gtk::Overlay,
+    #[cfg(target_os = "linux")]
     fixed: gtk::Fixed,
     #[cfg(target_os = "linux")]
     overlay_fixed: gtk::Fixed,
@@ -81,6 +83,7 @@ impl NativeRoot {
             vbox.pack_start(&overlay_host, true, true, 0);
             overlay_host.show_all();
             Ok(Self {
+                overlay_host,
                 fixed,
                 overlay_fixed,
                 chrome_fixed,
@@ -94,6 +97,17 @@ impl NativeRoot {
             Ok(Self {})
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_frontend_layering(&self) {
+        use gtk::prelude::*;
+        self.overlay_host.reorder_overlay(&self.chrome_fixed, 0);
+        self.overlay_host.reorder_overlay(&self.fixed, 1);
+        self.overlay_host.reorder_overlay(&self.overlay_fixed, 2);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn set_frontend_layering(&self) {}
 
     #[cfg(target_os = "linux")]
     pub fn allocated_size(&self) -> Option<(f64, f64)> {
@@ -155,18 +169,20 @@ impl NativeRoot {
 }
 
 impl ChromeWebView {
-    pub fn new(window: &Window, root: &NativeRoot) -> Result<Self> {
+    pub fn new(window: &Window, root: &NativeRoot, frontend_url: Option<&str>) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let _ = window;
         let messages = Rc::new(RefCell::new(Vec::new()));
         let message_queue = Rc::clone(&messages);
-        let builder = WebViewBuilder::new()
-            .with_html(CHROME_HTML)
-            .with_ipc_handler(move |request| {
-                #[cfg(debug_assertions)]
-                eprintln!("BrowserKit ipc_received");
-                message_queue.borrow_mut().push(request.body().to_owned());
-            });
+        let builder = match frontend_url {
+            Some(url) => WebViewBuilder::new().with_url(url).with_transparent(true),
+            None => WebViewBuilder::new().with_html(CHROME_HTML),
+        }
+        .with_ipc_handler(move |request| {
+            #[cfg(debug_assertions)]
+            eprintln!("BrowserKit ipc_received");
+            message_queue.borrow_mut().push(request.body().to_owned());
+        });
         #[cfg(target_os = "linux")]
         use wry::WebViewBuilderExtUnix;
         #[cfg(target_os = "linux")]

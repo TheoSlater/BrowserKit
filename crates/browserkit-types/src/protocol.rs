@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::PageId;
+use crate::{CoordinateSpace, LogicalRect, PageId};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -60,6 +60,24 @@ pub enum Command {
     PageClose {
         #[serde(rename = "pageId")]
         page_id: PageId,
+    },
+    #[serde(rename = "page.set_view_bounds")]
+    PageSetViewBounds {
+        #[serde(rename = "pageId")]
+        page_id: PageId,
+        rect: LogicalRect,
+        #[serde(rename = "coordinateSpace")]
+        coordinate_space: CoordinateSpace,
+        #[serde(rename = "devicePixelRatio")]
+        device_pixel_ratio: f64,
+        #[serde(rename = "visualViewportScale")]
+        visual_viewport_scale: f64,
+    },
+    #[serde(rename = "page.set_visible")]
+    PageSetVisible {
+        #[serde(rename = "pageId")]
+        page_id: PageId,
+        visible: bool,
     },
 }
 

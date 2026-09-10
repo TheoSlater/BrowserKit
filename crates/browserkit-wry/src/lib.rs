@@ -31,6 +31,13 @@ pub trait PlatformBackend {
     ) -> Result<WebView>;
 
     fn create_chrome(&self, window: &Window, root: &mut NativeRoot) -> Result<ChromeWebView>;
+
+    fn create_chrome_with_url(
+        &self,
+        window: &Window,
+        root: &mut NativeRoot,
+        url: Option<&str>,
+    ) -> Result<ChromeWebView>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -56,7 +63,16 @@ impl PlatformBackend for WryBackend {
     }
 
     fn create_chrome(&self, window: &Window, root: &mut NativeRoot) -> Result<ChromeWebView> {
-        ChromeWebView::new(window, root)
+        self.create_chrome_with_url(window, root, None)
+    }
+
+    fn create_chrome_with_url(
+        &self,
+        window: &Window,
+        root: &mut NativeRoot,
+        url: Option<&str>,
+    ) -> Result<ChromeWebView> {
+        ChromeWebView::new(window, root, url)
     }
 }
 

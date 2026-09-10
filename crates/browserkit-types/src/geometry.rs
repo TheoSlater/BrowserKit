@@ -1,7 +1,9 @@
 use crate::{Error, ErrorKind, Result};
+use serde::{Deserialize, Serialize};
 
 /// Coordinate system for a rectangle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CoordinateSpace {
     /// CSS pixels reported by future frontend geometry integration.
     FrontendLogical,
@@ -12,7 +14,7 @@ pub enum CoordinateSpace {
 }
 
 /// Floating-point rectangle in logical coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LogicalRect {
     pub x: f64,
     pub y: f64,

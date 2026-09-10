@@ -10,6 +10,8 @@ pub struct WindowOptions {
     pub height: u32,
     /// Show BrowserKit's Linux-only native overlay smoke widget.
     pub debug_native_overlay: bool,
+    /// Optional frontend URL. When set, ChromeSurface hosts this frontend full-window.
+    pub frontend_url: Option<String>,
 }
 
 impl Default for WindowOptions {
@@ -19,6 +21,7 @@ impl Default for WindowOptions {
             width: 1200,
             height: 800,
             debug_native_overlay: false,
+            frontend_url: None,
         }
     }
 }

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use browserkit_types::{
-    BrowserOptions, Command, Error, ErrorKind, Event, FrontendMessage, LogicalRect, NativeMessage,
-    PageId, PageOptions, PageState, ProtocolError, Request, ResponseData, Result, WindowId,
-    WindowOptions, WindowState,
+    BrowserOptions, Command, CoordinateSpace, Error, ErrorKind, Event, FrontendMessage,
+    LogicalRect, NativeMessage, PageId, PageOptions, PageState, ProtocolError, Request,
+    ResponseData, Result, WindowId, WindowOptions, WindowState,
 };
 use browserkit_wry::{
     ChromeWebView, NativeRoot, PageEvent, PageEventQueue, PlatformBackend, WebView, WryBackend,
@@ -80,6 +80,7 @@ struct RuntimeWindow {
     window: tao::window::Window,
     root: NativeRoot,
     debug_native_overlay: bool,
+    frontend_url: Option<String>,
     scale_factor: f64,
     pages: HashMap<PageId, RuntimePage>,
     page_order: Vec<PageId>,
@@ -113,6 +114,7 @@ impl Runtime {
     }
 
     pub fn create_window(&mut self, options: WindowOptions) -> Result<WindowId> {
+        let frontend_url = options.frontend_url.clone();
         let window = WindowBuilder::new()
             .with_title(options.title)
             .with_inner_size(tao::dpi::LogicalSize::new(options.width, options.height))
@@ -128,6 +130,7 @@ impl Runtime {
                 window,
                 root,
                 debug_native_overlay,
+                frontend_url,
                 scale_factor,
                 pages: HashMap::new(),
                 page_order: Vec::new(),
@@ -284,7 +287,13 @@ impl Runtime {
             page_events,
         } = self;
         event_loop.run(move |event, _, control_flow| {
-            *control_flow = ControlFlow::Wait;
+            *control_flow = if windows.values().any(|window| window.frontend_url.is_some()) {
+                // GTK WebKit IPC callbacks do not always wake Tao. Poll only for frontend
+                // windows; BrowserView deduplication keeps this loop free of IPC flood.
+                ControlFlow::Poll
+            } else {
+                ControlFlow::Wait
+            };
             match event {
                 TaoEvent::WindowEvent {
                     window_id,
@@ -334,6 +343,21 @@ impl Runtime {
                     reconcile_layout(window, width, height);
                 }
             }
+            let window_ids: Vec<_> = windows.keys().copied().collect();
+            for window_id in window_ids {
+                let _ = handle_chrome_messages(
+                    &mut windows,
+                    window_id,
+                    &backend,
+                    &mut next_id,
+                    &mut next_surface_id,
+                    page_events.clone(),
+                );
+            }
+            // WebKit may invoke an IPC callback while the GTK queue is being pumped.
+            // Drain once more so frontend layout messages do not wait for unrelated Tao input.
+            browserkit_wry::pump_events();
+            process_page_events(&mut windows, &page_events);
             let window_ids: Vec<_> = windows.keys().copied().collect();
             for window_id in window_ids {
                 let _ = handle_chrome_messages(
@@ -438,7 +462,14 @@ fn create_page_surface(
     if options.host_mode == browserkit_types::WebViewHostMode::Composition
         && window.chrome.is_none()
     {
-        let chrome = backend.create_chrome(&window.window, &mut window.root)?;
+        let chrome = if let Some(url) = window.frontend_url.as_deref() {
+            backend.create_chrome_with_url(&window.window, &mut window.root, Some(url))?
+        } else {
+            backend.create_chrome(&window.window, &mut window.root)?
+        };
+        if window.frontend_url.is_some() {
+            window.root.set_frontend_layering();
+        }
         window.chrome = Some(RuntimeChrome {
             webview: chrome,
             surface: ChromeSurface {
@@ -635,6 +666,60 @@ fn execute_command(
         }
         Command::PageClose { page_id } => {
             close_page_in_window(windows, window_id, page_id).map_err(protocol_from_error)
+        }
+        Command::PageSetViewBounds {
+            page_id,
+            rect,
+            coordinate_space,
+            device_pixel_ratio,
+            visual_viewport_scale,
+        } => {
+            if coordinate_space != CoordinateSpace::FrontendLogical
+                || !device_pixel_ratio.is_finite()
+                || device_pixel_ratio <= 0.0
+                || !visual_viewport_scale.is_finite()
+                || visual_viewport_scale <= 0.0
+            {
+                return Err(error_for_protocol(
+                    "invalid_geometry",
+                    "frontend bounds metadata is invalid",
+                ));
+            }
+            rect.validate().map_err(protocol_from_error)?;
+            let window = windows
+                .get_mut(&window_id)
+                .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+            let page = window
+                .pages
+                .get_mut(&page_id)
+                .ok_or_else(|| error_for_protocol("page_not_found", "page not found"))?;
+            page.webview.set_bounds(rect).map_err(protocol_from_error)?;
+            page.surface.bounds = rect;
+            #[cfg(debug_assertions)]
+            eprintln!("BrowserKit native_geometry_received: page={page_id:?} rect={rect:?}");
+            Ok(())
+        }
+        Command::PageSetVisible { page_id, visible } => {
+            let window = windows
+                .get_mut(&window_id)
+                .ok_or_else(|| error_for_protocol("window_not_found", "window not found"))?;
+            let active = window.active_page == Some(page_id);
+            let page = window
+                .pages
+                .get_mut(&page_id)
+                .ok_or_else(|| error_for_protocol("page_not_found", "page not found"))?;
+            page.webview
+                .set_visible(visible)
+                .map_err(protocol_from_error)?;
+            page.webview
+                .set_interactive(visible && active)
+                .map_err(protocol_from_error)?;
+            page.surface.set_visible(visible);
+            if !visible && active {
+                window.active_page = None;
+                page.state.active = false;
+            }
+            Ok(())
         }
     }
 }
@@ -865,15 +950,26 @@ fn apply_resize(window: &mut RuntimeWindow, physical_size: PhysicalSize<u32>) {
 
 fn reconcile_layout(window: &mut RuntimeWindow, width: f64, height: f64) {
     let bounds = content_bounds(width, height);
-    let chrome_bounds = chrome_bounds(width);
-    #[cfg(debug_assertions)]
-    if bounds.x + bounds.width > width || bounds.y + bounds.height > height {
-        eprintln!("BrowserKit warning: page bounds exceed GTK logical root bounds");
-    }
-    for page in window.pages.values_mut() {
-        if page.surface.bounds != bounds {
-            let _ = page.webview.set_bounds(bounds);
-            page.surface.bounds = bounds;
+    let chrome_bounds = if window.frontend_url.is_some() {
+        LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: width.max(0.0),
+            height: height.max(0.0),
+        }
+    } else {
+        chrome_bounds(width)
+    };
+    if window.frontend_url.is_none() {
+        #[cfg(debug_assertions)]
+        if bounds.x + bounds.width > width || bounds.y + bounds.height > height {
+            eprintln!("BrowserKit warning: page bounds exceed GTK logical root bounds");
+        }
+        for page in window.pages.values_mut() {
+            if page.surface.bounds != bounds {
+                let _ = page.webview.set_bounds(bounds);
+                page.surface.bounds = bounds;
+            }
         }
     }
     if let Some(chrome) = &mut window.chrome {
