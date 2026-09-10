@@ -11,6 +11,8 @@ use wry::{
 pub struct WebView {
     inner: wry::WebView,
     bounds: Option<LogicalRect>,
+    requested: Rc<RefCell<Option<LogicalRect>>>,
+    surface_name: &'static str,
 }
 
 pub struct ChromeWebView {
@@ -55,12 +57,24 @@ impl NativeRoot {
             // Root follows the toplevel allocation; child requests must not resize it.
             fixed.set_size_request(0, 0);
             let overlay_host = gtk::Overlay::new();
+            let background = gtk::DrawingArea::new();
             let overlay_fixed = gtk::Fixed::new();
             let chrome_fixed = gtk::Fixed::new();
             overlay_host.set_size_request(0, 0);
             overlay_fixed.set_size_request(0, 0);
             chrome_fixed.set_size_request(0, 0);
-            overlay_host.add(&fixed);
+            background.set_size_request(0, 0);
+            for layer in [&fixed, &overlay_fixed, &chrome_fixed] {
+                layer.set_hexpand(true);
+                layer.set_vexpand(true);
+                layer.set_halign(gtk::Align::Fill);
+                layer.set_valign(gtk::Align::Fill);
+            }
+            // Overlay children are allocated over the neutral background but are not
+            // included in GtkOverlay's preferred-size request. This keeps persistent
+            // surface requests from resizing the Tao toplevel.
+            overlay_host.add(&background);
+            overlay_host.add_overlay(&fixed);
             overlay_host.add_overlay(&overlay_fixed);
             overlay_host.add_overlay(&chrome_fixed);
             vbox.pack_start(&overlay_host, true, true, 0);
@@ -144,10 +158,7 @@ impl ChromeWebView {
         #[cfg(not(target_os = "linux"))]
         let inner = builder.build_as_child(window).map_err(super::map_error)?;
         Ok(Self {
-            webview: WebView {
-                inner,
-                bounds: None,
-            },
+            webview: WebView::from_inner(inner, "Chrome"),
             commands,
         })
     }
@@ -219,10 +230,60 @@ impl WebView {
         let inner = builder.build_gtk(&root.fixed).map_err(super::map_error)?;
         #[cfg(not(target_os = "linux"))]
         let inner = builder.build_as_child(_window).map_err(super::map_error)?;
-        Ok(Self {
+        Ok(Self::from_inner(inner, "Page"))
+    }
+
+    fn from_inner(inner: wry::WebView, surface_name: &'static str) -> Self {
+        let requested: Rc<RefCell<Option<LogicalRect>>> = Rc::new(RefCell::new(None));
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            use wry::WebViewExtUnix;
+            let widget = inner.webview();
+            let requested_for_log = Rc::clone(&requested);
+            widget.connect_size_allocate(move |widget, allocation| {
+                let parent = widget.parent().map(|parent| parent.allocation());
+                let root = widget
+                    .parent()
+                    .and_then(|parent| parent.parent())
+                    .map(|root| root.allocation());
+                #[cfg(debug_assertions)]
+                let requested = *requested_for_log.borrow();
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "BrowserKit surface allocation: surface={surface_name} requested={:?} size_request={}x{} actual={}x{} @ {},{} parent={parent:?} root={root:?}",
+                    requested,
+                    widget.width_request(),
+                    widget.height_request(),
+                    allocation.width(),
+                    allocation.height(),
+                    allocation.x(),
+                    allocation.y(),
+                );
+                #[cfg(debug_assertions)]
+                if let Some(requested) = requested {
+                    let actual_width = f64::from(allocation.width());
+                    let actual_height = f64::from(allocation.height());
+                    if (actual_width - requested.width.round()).abs() > 1.0
+                        || (actual_height - requested.height.round()).abs() > 1.0
+                    {
+                        eprintln!(
+                            "BrowserKit warning: {surface_name} allocation differs from requested: requested={}x{} actual={}x{}",
+                            requested.width,
+                            requested.height,
+                            actual_width,
+                            actual_height
+                        );
+                    }
+                }
+            });
+        }
+        Self {
             inner,
             bounds: None,
-        })
+            requested,
+            surface_name,
+        }
     }
 
     pub fn navigate(&self, url: &str) -> Result<()> {
@@ -244,11 +305,29 @@ impl WebView {
     pub fn set_bounds(&mut self, bounds: LogicalRect) -> Result<()> {
         bounds.validate()?;
         #[cfg(debug_assertions)]
-        eprintln!("BrowserKit page_bounds_requested: {bounds:?}");
+        eprintln!(
+            "BrowserKit {}_bounds_requested: {bounds:?}",
+            self.surface_name.to_ascii_lowercase()
+        );
         if self.bounds == Some(bounds) {
             #[cfg(debug_assertions)]
-            eprintln!("BrowserKit page_bounds_deduplicated");
+            eprintln!(
+                "BrowserKit {}_bounds_deduplicated",
+                self.surface_name.to_ascii_lowercase()
+            );
             return Ok(());
+        }
+        *self.requested.borrow_mut() = Some(bounds);
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            let width = bounds.width.round().clamp(0.0, i32::MAX as f64) as i32;
+            let height = bounds.height.round().clamp(0.0, i32::MAX as f64) as i32;
+            // The root and layers have neutral requests, so this persistent child
+            // request cannot become a toplevel request. It is required for GtkFixed
+            // to retain the assigned size after a later relayout.
+            use wry::WebViewExtUnix;
+            self.inner.webview().set_size_request(width, height);
         }
         self.inner
             .set_bounds(wry::Rect {
@@ -258,7 +337,10 @@ impl WebView {
             .map_err(super::map_error)?;
         self.bounds = Some(bounds);
         #[cfg(debug_assertions)]
-        eprintln!("BrowserKit page_bounds_applied_gtk: {bounds:?}");
+        eprintln!(
+            "BrowserKit {}_bounds_applied_gtk: {bounds:?}",
+            self.surface_name.to_ascii_lowercase()
+        );
         Ok(())
     }
 
