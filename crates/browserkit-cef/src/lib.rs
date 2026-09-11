@@ -224,12 +224,15 @@ thread_local! { static CHROME_READY: std::cell::Cell<bool> = const { std::cell::
 const CHROME_URL: &str = "browserkit://app/index.html";
 pub type ProtocolHandler = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-const CHROME_HTML: &str = r#"<!doctype html><meta charset="utf-8"><title>BrowserKit</title>
-<style>body{font:14px sans-serif;margin:8px}button,input,select{margin:2px}pre{white-space:pre-wrap}</style>
+const CHROME_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>BrowserKit</title>
+<style>
+html,body{min-height:100%;background:#f3f4f6;color:#202124}body{font:14px sans-serif;margin:0;padding:10px;box-sizing:border-box}
+#toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px}#toolbar strong{margin-right:8px}button,input,select{font:inherit}button,input,select{padding:3px 6px}pre{white-space:pre-wrap;margin:8px 0 0}
+</style></head><body><div id="toolbar"><strong>BrowserKit</strong>
 <button id="create">Create page</button><select id="pages"></select>
 <button id="close">Close active</button><button id="back">Back</button><button id="forward">Forward</button>
 <button id="reload">Reload</button><button id="stop">Stop</button>
-<input id="url" value="https://example.com"><button id="navigate">Go</button><pre id="state"></pre>
+<input id="url" value="https://example.com"><button id="navigate">Go</button></div><pre id="state"></pre>
 <script>
 (() => { const pending=new Map(); let serial=0, state={windows:[]};
 window.__browserkit={send(message){ window.cefQuery({request:JSON.stringify(message),onSuccess:receive,onFailure:(_,e)=>console.error(e)}); },receive};
@@ -242,7 +245,7 @@ function render(){document.querySelector('#state').textContent=JSON.stringify(st
 document.querySelector('#create').onclick=()=>request({type:'page_create',window_id:state.windows[0].id,options:{url:'https://example.org'}}).then(d=>{state.windows[0].pages.push(d.page);render()});
 document.querySelector('#pages').onchange=e=>command({type:'page_activate',window_id:state.windows[0].id,page_id:+e.target.value});document.querySelector('#close').onclick=()=>command({type:'page_close',window_id:state.windows[0].id,page_id:active()});document.querySelector('#navigate').onclick=()=>command({type:'page_navigate',page_id:active(),url:document.querySelector('#url').value});document.querySelector('#back').onclick=()=>command({type:'page_go_back',page_id:active()});document.querySelector('#forward').onclick=()=>command({type:'page_go_forward',page_id:active()});document.querySelector('#reload').onclick=()=>command({type:'page_reload',page_id:active()});document.querySelector('#stop').onclick=()=>command({type:'page_stop',page_id:active()});
 request({type:'runtime_handshake',protocol_version:1}).then(d=>{state.windows=d.windows;render()}).catch(console.error);
-})();</script>"#;
+})();</script></body></html>"#;
 
 fn send_to_chrome(message: browserkit_types::protocol::NativeMessage) {
     if !CHROME_READY.with(|ready| ready.get()) {
