@@ -1,5 +1,0 @@
-packages:
-  - "packages/*"
-  - "examples/react-browser"
-allowBuilds:
-  esbuild: set this to true or false

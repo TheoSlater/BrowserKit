@@ -1,0 +1,9 @@
+[package]
+name = "browserkit-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+browserkit.workspace = true

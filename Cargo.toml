@@ -1,13 +1,24 @@
 [workspace]
+members = [
+    "crates/browserkit",
+    "crates/browserkit-runtime",
+    "crates/browserkit-cef",
+    "crates/browserkit-types",
+    "examples/minimal",
+]
 resolver = "2"
 
-exclude = ["vendor/wry"]
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
 
-members = [
-  "crates/browserkit",
-  "crates/browserkit-runtime",
-  "crates/browserkit-wry",
-  "crates/browserkit-types",
-  "examples/native",
-  "examples/compositor-smoke",
-]
+[workspace.dependencies]
+browserkit = { path = "crates/browserkit" }
+browserkit-runtime = { path = "crates/browserkit-runtime" }
+browserkit-cef = { path = "crates/browserkit-cef" }
+browserkit-types = { path = "crates/browserkit-types" }
+cef = { git = "https://github.com/tauri-apps/cef-rs.git", rev = "40c85f465c41a1fd2713c6165d1037de125a0d22" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
