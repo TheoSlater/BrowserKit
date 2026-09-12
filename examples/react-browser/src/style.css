@@ -1,0 +1,37 @@
+:root {
+  color: #202124;
+  background: #f3f4f6;
+  font: 14px/1.4 system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; min-width: 720px; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+
+.browser-shell { display: flex; height: 100%; min-height: 0; }
+.sidebar { display: flex; width: 220px; flex: none; flex-direction: column; gap: 6px; padding: 12px; border-right: 1px solid #d5d8dd; background: #e8eaed; transition: width 180ms ease; }
+.brand { padding: 2px 4px 12px; font-size: 17px; }
+.sidebar-label { padding: 4px; color: #5f6368; font-size: 12px; text-transform: uppercase; }
+.page-choice { overflow: hidden; border: 0; border-radius: 5px; background: transparent; padding: 8px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.page-choice:hover, .page-choice.active { background: #fff; }
+.page-choice.active { box-shadow: inset 3px 0 #2563eb; font-weight: 650; }
+.page-choice.add { color: #174ea6; }
+.layout-controls { display: grid; gap: 6px; margin-top: auto; }
+.layout-controls button { border: 1px solid #aeb4bd; border-radius: 4px; background: #fff; padding: 6px; font-size: 12px; }
+.browser-main { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; padding: 8px; gap: 6px; }
+.tabs, .toolbar { display: flex; align-items: center; gap: 6px; }
+.tabs { min-height: 28px; overflow: hidden; }
+.tabs button { border: 1px solid #aeb4bd; border-radius: 4px; background: #fff; padding: 4px 8px; }
+.layout-note { color: #5f6368; font-size: 12px; }
+.tab { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 6px 8px; }
+.tab.active { border-bottom-color: #2563eb; font-weight: 650; }
+.tab.add { font-size: 18px; padding-inline: 10px; }
+.toolbar { min-height: 34px; }
+.toolbar.tall { min-height: 64px; }
+.toolbar input { min-width: 220px; flex: 1; border: 1px solid #aeb4bd; border-radius: 4px; padding: 5px 8px; }
+.toolbar button { border: 1px solid #aeb4bd; border-radius: 4px; background: #fff; padding: 5px 8px; }
+.browser-view { min-height: 0; flex: 1; border: 1px solid #d5d8dd; background: #dfe3e8; }
+.browser-view.padded { margin: 10px; }

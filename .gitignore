@@ -1,1 +1,5 @@
-/target
+node_modules/
+/target/
+/packages/*/node_modules/
+/packages/*/dist/
+/examples/react-browser/dist/

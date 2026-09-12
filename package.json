@@ -1,0 +1,24 @@
+{
+  "name": "browserkit-workspace",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "dev": "pnpm --filter react-browser dev --host 127.0.0.1",
+    "test": "pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --recursive --if-present run typecheck"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "jsdom": "^26.1.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vitest": "^3.2.4"
+  }
+}

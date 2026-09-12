@@ -20,6 +20,21 @@ cargo check --workspace
 cargo run -p browserkit-example
 ```
 
+Build React frontend first for production assets:
+
+```bash
+pnpm install
+pnpm --filter react-browser build
+cargo run -p browserkit-example
+```
+
+Use Vite during frontend development:
+
+```bash
+pnpm --filter react-browser dev --host 127.0.0.1
+BROWSERKIT_FRONTEND_URL=http://127.0.0.1:5173 cargo run -p browserkit-example
+```
+
 The first build downloads and extracts the CEF archive through `cef-rs`'s `cef-dll-sys` build script. No CEF binaries are committed. By default the archive is placed below Cargo's build `OUT_DIR`; set `CEF_PATH` to a shared directory to cache it across builds. `cef-rs` also supports `cargo run -p export-cef-dir -- --force $HOME/.local/share/cef` from its own checkout.
 
 This workspace pins the maintained `tauri-apps/cef-rs` source at commit `40c85f4` (crate `152.1.0+152.0.6` packaging CEF `152.0.6`, Chromium `152.0.7977.83`). The build also copies the Linux runtime files next to the executable as required by current cef-rs.
@@ -46,9 +61,17 @@ The Vulkan-only switch is intentionally distinct from full GPU disable. Invalid 
 
 ## Scope
 
-M0-E contains one CEF Views window with a dedicated Alloy chrome BrowserView and multiple Alloy page BrowserViews. The chrome is loaded from the CEF-owned `browserkit://app/index.html` scheme and talks to the typed protocol with CEF's maintained `MessageRouter` (`cefQuery`). Page views are never given that bridge. The first page is active automatically; later pages are created and kept alive but hidden until `set_active_page` selects them. Closing the active page selects the page to its right, otherwise the page to its left, otherwise no page. Closing the final page leaves the window open. Alloy uses Chromium's content layer without Chrome browser UI. React, Vite, tabs UI, OSR, custom compositing, and frontend packages are not part of this milestone.
+M0-E established one CEF Views window with a dedicated Alloy chrome BrowserView and multiple Alloy page BrowserViews. The chrome is loaded from the CEF-owned `browserkit://app/index.html` scheme and talks to the typed protocol with CEF's maintained `MessageRouter` (`cefQuery`). Page views are never given that bridge. The first page is active automatically; later pages are created and kept alive but hidden until `set_active_page` selects them. Closing the active page selects the page to its right, otherwise the page to its left, otherwise no page. Closing the final page leaves the window open. Alloy uses Chromium's content layer without Chrome browser UI.
 
-The temporary chrome validates handshake, page creation, activation, close, navigation, back/forward, reload, and stop through the same `ProtocolRouter` used by native callers. Enable the diagnostic software-rendering switches only when investigating a host GPU issue:
+M0-F replaces temporary chrome with the React/Vite frontend in `examples/react-browser`, backed by `@browserkit/core` and `@browserkit/react`. Production assets load from `browserkit://app`; dev mode allows only the configured localhost origin.
+
+M0-G makes each React `<BrowserView>` DOM rectangle authoritative for its native page CEF View. The chrome BrowserView fills the CEF Window; page views are explicit children with zero/hidden initial bounds and are rounded from CSS logical pixels to integer CEF View bounds on the UI thread. `getBoundingClientRect()` uses the chrome viewport origin, so there is no titlebar offset; DPR, visual viewport scale, and CEF scale are metadata only and are not multiplied into current CEF Views bounds. OSR, custom compositing, and overlays remain out of scope.
+
+M0-H adds an opt-in CEF windowless page renderer. Set `BROWSERKIT_PAGE_RENDERER=osr` to create page browsers with `WindowInfo.windowless_rendering_enabled`, receive CPU `RenderHandler::on_paint` BGRA frames, and present them in an X11 child surface inside the single CEF top-level window. `BROWSERKIT_PAGE_RENDERER=native` (and the unset default) keeps the native page View fallback. The existing React `<BrowserView>` rectangle remains the only geometry input. The OSR compositor currently requires the X11 backend, so Linux OSR smoke runs should set `BROWSERKIT_OZONE_PLATFORM=x11`; the Wayland/native path remains available for fallback debugging.
+
+OSR forwards mouse, wheel, focus, keyboard, basic Latin text input, cursor, and CEF popup paint events. Full IME composition, drag/drop, custom context menus, accelerated/shared-texture paint, and non-Linux compositor backends remain deferred.
+
+Enable diagnostic software-rendering switches only when investigating a host GPU issue:
 
 ```bash
 BROWSERKIT_DISABLE_GPU=1 cargo run -p browserkit-example

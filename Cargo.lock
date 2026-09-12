@@ -108,6 +108,7 @@ version = "0.1.0"
 dependencies = [
  "browserkit-types",
  "cef",
+ "libc",
  "serde_json",
  "thiserror",
 ]

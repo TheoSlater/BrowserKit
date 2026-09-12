@@ -20,4 +20,6 @@ pub enum BrowserKitError {
     RuntimeNotReady,
     #[error("invalid active page")]
     InvalidActivePage,
+    #[error("invalid page view bounds: {0}")]
+    InvalidViewBounds(String),
 }

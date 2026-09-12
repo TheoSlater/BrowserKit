@@ -5,7 +5,10 @@ pub use browserkit_types::protocol::{
     ProtocolErrorCode, Request, RequestEnvelope, RequestId, ResponseData, ResponseEnvelope,
     ResponseResult, PROTOCOL_VERSION,
 };
-pub use browserkit_types::{BrowserEvent, PageId, PageOptions, PageState, WindowId, WindowState};
+pub use browserkit_types::{
+    BrowserEvent, CoordinateSpace, LogicalRect, PageId, PageOptions, PageState, PageViewBounds,
+    WindowId, WindowState,
+};
 pub use error::BrowserKitError;
 pub type Result<T> = std::result::Result<T, BrowserKitError>;
 
@@ -233,6 +236,20 @@ impl ProtocolRouter {
             Command::PageClose { window_id, page_id } => {
                 self.window(window_id)?.close_page(page_id)
             }
+            Command::PageRegisterView { page_id } => self.page(page_id)?.register_view(),
+            Command::PageSetViewBounds {
+                page_id,
+                rect,
+                coordinate_space,
+                device_pixel_ratio,
+                visual_viewport_scale,
+            } => self.page(page_id)?.set_view_bounds(PageViewBounds {
+                rect,
+                coordinate_space,
+                device_pixel_ratio,
+                visual_viewport_scale,
+            }),
+            Command::PageUnregisterView { page_id } => self.page(page_id)?.unregister_view(),
         }
     }
 
@@ -332,6 +349,7 @@ fn protocol_error_from_browserkit(error: BrowserKitError) -> (ProtocolErrorCode,
         BrowserKitError::WindowNotFound => ProtocolErrorCode::WindowNotFound,
         BrowserKitError::PageNotFound(_) => ProtocolErrorCode::PageNotFound,
         BrowserKitError::InvalidUrl(_) => ProtocolErrorCode::InvalidUrl,
+        BrowserKitError::InvalidViewBounds(_) => ProtocolErrorCode::InvalidViewBounds,
         BrowserKitError::RuntimeNotReady => ProtocolErrorCode::RuntimeNotReady,
         _ => ProtocolErrorCode::RequestFailed,
     };
@@ -580,6 +598,24 @@ impl Page {
         self.command(browserkit_runtime::PageCommand::Stop { page_id: self.id })
     }
 
+    pub fn register_view(&self) -> Result<()> {
+        self.command(browserkit_runtime::PageCommand::RegisterView { page_id: self.id })
+    }
+
+    pub fn set_view_bounds(&self, bounds: PageViewBounds) -> Result<()> {
+        bounds
+            .validate()
+            .map_err(|error| BrowserKitError::InvalidViewBounds(error.into()))?;
+        self.command(browserkit_runtime::PageCommand::SetViewBounds {
+            page_id: self.id,
+            bounds,
+        })
+    }
+
+    pub fn unregister_view(&self) -> Result<()> {
+        self.command(browserkit_runtime::PageCommand::UnregisterView { page_id: self.id })
+    }
+
     fn ensure_running(&self) -> Result<()> {
         self.control
             .running
@@ -755,5 +791,36 @@ mod tests {
         );
         let response = router.handle_message(&request).unwrap();
         assert!(response.contains("https://example.com"));
+    }
+
+    #[test]
+    fn invalid_view_bounds_are_rejected_before_runtime_dispatch() {
+        let app = BrowserKit::builder().build().unwrap();
+        let window = app.create_window().unwrap();
+        let page = window
+            .create_page(PageOptions::new("https://example.com"))
+            .unwrap();
+        let result = page.set_view_bounds(PageViewBounds {
+            rect: LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: -1.0,
+                height: 1.0,
+            },
+            coordinate_space: CoordinateSpace::FrontendLogical,
+            device_pixel_ratio: 1.0,
+            visual_viewport_scale: 1.0,
+        });
+        assert!(matches!(result, Err(BrowserKitError::InvalidViewBounds(_))));
+    }
+
+    #[test]
+    fn unknown_page_view_bounds_do_not_panic() {
+        let app = BrowserKit::builder().build().unwrap();
+        let router = app.protocol_router();
+        let response = router.handle_message(
+            r#"{"type":"command","command":{"type":"page_set_view_bounds","page_id":999,"rect":{"x":0.5,"y":0.5,"width":10.0,"height":10.0},"coordinate_space":"frontend_logical","device_pixel_ratio":1.0,"visual_viewport_scale":1.0}}"#,
+        );
+        assert!(response.is_none());
     }
 }

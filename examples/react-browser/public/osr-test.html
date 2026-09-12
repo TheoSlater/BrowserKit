@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BrowserKit OSR test</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 24px; }
+  .scroll { border: 1px solid #888; height: 140px; overflow: auto; padding: 12px; }
+  .hover { display: inline-block; padding: 12px; background: #dbeafe; }
+  .hover:hover { background: #86efac; }
+</style>
+<h1>BrowserKit OSR test</h1>
+<button id="button">Button</button>
+<a href="#clicked" id="link">Link</a>
+<p><label>Input <input id="input"></label></p>
+<p><label>Textarea <textarea id="textarea" rows="3"></textarea></label></p>
+<p><label>Select <select id="select"><option>One</option><option>Two</option></select></label></p>
+<p><label><input id="checkbox" type="checkbox"> Checkbox</label></p>
+<p class="hover">Hover target</p>
+<div class="scroll">
+  Scroll region<br>
+  01<br>02<br>03<br>04<br>05<br>06<br>07<br>08<br>09<br>10<br>11<br>12
+</div>
+<p id="status">Ready</p>
+<script>
+  const status = document.querySelector("#status");
+  document.querySelector("#button").onclick = () => status.textContent = "Button clicked";
+  document.querySelector("#link").onclick = () => status.textContent = "Link clicked";
+</script>

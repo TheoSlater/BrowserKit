@@ -1,4 +1,7 @@
-use super::{BrowserEvent, PageId, PageOptions, PageState, WindowId, WindowState};
+use super::{
+    BrowserEvent, CoordinateSpace, LogicalRect, PageId, PageOptions, PageState, WindowId,
+    WindowState,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -7,14 +10,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(transparent)]
 pub struct RequestId(pub String);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FrontendMessage {
     Command(CommandEnvelope),
     Request(RequestEnvelope),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommandEnvelope {
     pub command: Command,
 }
@@ -25,7 +28,7 @@ pub struct RequestEnvelope {
     pub request: Request,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     PageNavigate {
@@ -50,6 +53,19 @@ pub enum Command {
     },
     PageClose {
         window_id: WindowId,
+        page_id: PageId,
+    },
+    PageRegisterView {
+        page_id: PageId,
+    },
+    PageSetViewBounds {
+        page_id: PageId,
+        rect: LogicalRect,
+        coordinate_space: CoordinateSpace,
+        device_pixel_ratio: f64,
+        visual_viewport_scale: f64,
+    },
+    PageUnregisterView {
         page_id: PageId,
     },
 }
@@ -199,6 +215,7 @@ pub enum ProtocolErrorCode {
     RuntimeNotReady,
     RuntimeShuttingDown,
     RequestFailed,
+    InvalidViewBounds,
 }
 
 #[cfg(test)]
@@ -240,5 +257,30 @@ mod tests {
     #[test]
     fn protocol_version_is_single_source_of_truth() {
         assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn view_bounds_keep_wire_names_and_fractional_values() {
+        let message = FrontendMessage::Command(CommandEnvelope {
+            command: Command::PageSetViewBounds {
+                page_id: PageId::from_raw(1),
+                rect: LogicalRect {
+                    x: 12.5,
+                    y: 24.0,
+                    width: 640.25,
+                    height: 480.0,
+                },
+                coordinate_space: CoordinateSpace::FrontendLogical,
+                device_pixel_ratio: 2.0,
+                visual_viewport_scale: 1.0,
+            },
+        });
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("page_set_view_bounds"));
+        assert!(json.contains("frontend_logical"));
+        assert_eq!(
+            serde_json::from_str::<FrontendMessage>(&json).unwrap(),
+            message
+        );
     }
 }

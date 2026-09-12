@@ -31,6 +31,9 @@ pub fn page_command(
         PageCommand::GoBack { .. } => PageCommand::GoBack { page_id },
         PageCommand::GoForward { .. } => PageCommand::GoForward { page_id },
         PageCommand::Stop { .. } => PageCommand::Stop { page_id },
+        PageCommand::RegisterView { .. } => PageCommand::RegisterView { page_id },
+        PageCommand::SetViewBounds { bounds, .. } => PageCommand::SetViewBounds { page_id, bounds },
+        PageCommand::UnregisterView { .. } => PageCommand::UnregisterView { page_id },
         other => other,
     };
     browserkit_cef::enqueue(queue, command).map_err(|e| Error::Cef(e.to_string()))
